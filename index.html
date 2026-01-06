@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>프로 에임 트레이너</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #121212; color: white; font-family: sans-serif; }
+        #overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            background: rgba(0, 0, 0, 0.9); z-index: 100;
+        }
+        .container { text-align: center; background: #1e1e1e; padding: 40px; border-radius: 20px; border: 2px solid #00ff00; width: 450px; }
+        .mode-container { display: flex; flex-direction: column; gap: 15px; margin: 30px 0; }
+        button {
+            padding: 15px; cursor: pointer; background: #333; border: 1px solid #00ff00; border-radius: 10px;
+            color: white; font-weight: bold; display: flex; justify-content: space-between; align-items: center;
+        }
+        button:hover { background: #00ff00; color: black; }
+        .best-label { color: #f1c40f; font-size: 0.8rem; }
+        input[type=range] { width: 100%; accent-color: #00ff00; }
+        
+        #ingame-ui {
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+            display: none; text-align: center; pointer-events: none; z-index: 10;
+        }
+        /* 가상 커서 스타일 */
+        #custom-cursor {
+            position: absolute; width: 10px; height: 10px; background: #00ff00;
+            border-radius: 50%; pointer-events: none; z-index: 999; display: none;
+            box-shadow: 0 0 10px #00ff00; transform: translate(-50%, -50%);
+        }
+        canvas { display: block; cursor: none; } /* 실제 마우스는 숨김 */
+    </style>
+</head>
+<body>
+
+    <div id="custom-cursor"></div>
+
+    <div id="overlay">
+        <div class="container">
+            <h1>AIM TRAINER</h1>
+            <div class="mode-container">
+                <button onclick="startGame('small')">Small & Fast <span class="best-label">BEST: <span id="hs-small">0</span></span></button>
+                <button onclick="startGame('big')">Big & Easy <span class="best-label">BEST: <span id="hs-big">0</span></span></button>
+            </div>
+            <div style="border-top: 1px solid #444; padding-top: 20px;">
+                <label>마우스 감도: <span id="sens-val" style="color:#00ff00">1.0</span></label>
+                <input type="range" id="sens-range" min="0.1" max="5.0" step="0.1" value="1.0">
+            </div>
+        </div>
+    </div>
+
+    <div id="ingame-ui">
+        <div style="font-size: 40px; color: #ff4d4d; font-weight: bold;" id="timer">20</div>
+        <div style="font-size: 24px; color: #00ff00;">Score: <span id="score-val">0</span></div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        /**
+         * [ 전역 게임 설정 변수 ]
+         */
+        const CONFIG = {
+            GAME_TIME: 20,          // 게임 유지 시간 (초)
+            MODES: {
+                small: { radius: 10, count: 10, name: "Small & Fast" },
+                big: { radius: 30, count: 8, name: "Big & Easy" }
+            },
+            TARGET_COLORS: ['#ff4d4d', '#ffffff', '#ff4d4d', '#f1c40f'], // 과녁 색상 (바깥쪽부터)
+            SPAWN_PADDING: 100      // 화면 가장자리 여유 공간
+        };
+
+        /**
+         * [ 시스템 내부 변수 ]
+         */
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const cursor = document.getElementById('custom-cursor');
+        const sensRange = document.getElementById('sens-range');
+        const sensValLabel = document.getElementById('sens-val');
+
+        let score = 0;
+        let highScores = { small: 0, big: 0 };
+        let timeLeft = CONFIG.GAME_TIME;
+        let targets = [];
+        let gameActive = false;
+        let currentMode = '';
+
+        // 가상 커서 위치 (감도 적용을 위한 변수)
+        let virtualX = window.innerWidth / 2;
+        let virtualY = window.innerHeight / 2;
+        let sensitivity = 1.0;
+
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        /**
+         * [ 감도 제어 로직 ]
+         * 실제 마우스의 움직임(movementX/Y)에 감도를 곱해 가상 커서의 좌표를 계산합니다.
+         */
+        window.addEventListener('mousemove', (e) => {
+            if (!gameActive) return;
+
+            // 실제 마우스 이동량에 감도 곱하기
+            virtualX += e.movementX * sensitivity;
+            virtualY += e.movementY * sensitivity;
+
+            // 화면 밖으로 나가지 않게 제한
+            virtualX = Math.max(0, Math.min(canvas.width, virtualX));
+            virtualY = Math.max(0, Math.min(canvas.height, virtualY));
+
+            // 가상 커서 위치 업데이트
+            cursor.style.left = virtualX + 'px';
+            cursor.style.top = virtualY + 'px';
+        });
+
+        sensRange.addEventListener('input', (e) => {
+            sensitivity = parseFloat(e.target.value);
+            sensValLabel.innerText = sensitivity.toFixed(1);
+        });
+
+        function getSafeLocation(radius) {
+            let newX, newY, overlap, attempts = 0;
+            do {
+                overlap = false;
+                newX = Math.random() * (canvas.width - CONFIG.SPAWN_PADDING * 2) + CONFIG.SPAWN_PADDING;
+                newY = Math.random() * (canvas.height - CONFIG.SPAWN_PADDING * 2) + CONFIG.SPAWN_PADDING;
+                for (let t of targets) {
+                    const dist = Math.sqrt((newX - t.x)**2 + (newY - t.y)**2);
+                    if (dist < (radius + t.r + 20)) { overlap = true; break; }
+                }
+                attempts++;
+            } while (overlap && attempts < 100);
+            return { x: newX, y: newY, r: radius };
+        }
+
+        function startGame(mode) {
+            currentMode = mode;
+            score = 0;
+            timeLeft = CONFIG.GAME_TIME;
+            targets = [];
+            virtualX = canvas.width / 2;
+            virtualY = canvas.height / 2;
+            
+            for(let i=0; i < CONFIG.MODES[mode].count; i++) targets.push(getSafeLocation(CONFIG.MODES[mode].radius));
+
+            document.getElementById('overlay').style.display = 'none';
+            document.getElementById('ingame-ui').style.display = 'block';
+            cursor.style.display = 'block';
+            
+            // Pointer Lock (마우스를 브라우저 안에 가두고 movementX를 읽기 위함)
+            canvas.requestPointerLock();
+            
+            gameActive = true;
+            const timerInterval = setInterval(() => {
+                timeLeft--;
+                document.getElementById('timer').innerText = timeLeft;
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    endGame();
+                }
+            }, 1000);
+            render();
+        }
+
+        function endGame() {
+            gameActive = false;
+            document.exitPointerLock();
+            if (score > highScores[currentMode]) {
+                highScores[currentMode] = score;
+                document.getElementById(`hs-${currentMode}`).innerText = score;
+            }
+            document.getElementById('overlay').style.display = 'flex';
+            document.getElementById('ingame-ui').style.display = 'none';
+            cursor.style.display = 'none';
+        }
+
+        function render() {
+            if (!gameActive) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            targets.forEach(t => {
+                const steps = [1, 0.7, 0.4, 0.15];
+                steps.forEach((s, i) => {
+                    ctx.beginPath();
+                    ctx.arc(t.x, t.y, t.r * s, 0, Math.PI * 2);
+                    ctx.fillStyle = CONFIG.TARGET_COLORS[i];
+                    ctx.fill();
+                    ctx.stroke();
+                });
+            });
+            requestAnimationFrame(render);
+        }
+
+        // 클릭 판정 (가상 커서 좌표 기준)
+        window.addEventListener('mousedown', () => {
+            if (!gameActive) return;
+            let hitIndex = -1;
+            for (let i = targets.length - 1; i >= 0; i--) {
+                const t = targets[i];
+                const dist = Math.sqrt((virtualX - t.x)**2 + (virtualY - t.y)**2);
+                if (dist <= t.r) { hitIndex = i; break; }
+            }
+            if (hitIndex !== -1) {
+                score += 100;
+                document.getElementById('score-val').innerText = score;
+                targets.splice(hitIndex, 1);
+                targets.push(getSafeLocation(CONFIG.MODES[currentMode].radius));
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+    </script>
+</body>
+</html>
